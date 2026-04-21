@@ -1,7 +1,7 @@
 """broll-dispatch 主入口。
 
 把选题 JSON 投递到 Windows B-Roll download agent 的 Google Drive inbox。
-MVP: 只实现 "dispatch test" 路径。
+支持: dispatch test / dispatch broll from scout。
 """
 import json
 import os
@@ -9,6 +9,11 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+
+import normalize_from_scout
 
 INBOX = Path(
     "/Users/ye/Library/CloudStorage/GoogleDrive-jacobye2017@gmail.com"
@@ -104,18 +109,59 @@ def cmd_test() -> int:
     return 0
 
 
+def cmd_from_scout() -> int:
+    if not INBOX.exists():
+        print(f"❌ inbox 不存在: {INBOX}")
+        return 2
+    latest = normalize_from_scout.find_latest_output()
+    if latest is None:
+        print("❌ Scout 还没产出选题，让 Tony 先跑一次\"今日选题\"")
+        return 3
+    log(f"📂 读取 Scout 最新输出: {latest.name}")
+
+    kept, total = normalize_from_scout.load_and_normalize(latest)
+    log(f"🧮 source={total} 条 / direction 过滤后剩 {len(kept)} 条")
+
+    if not kept:
+        print("❌ 这一批 Scout 选题方向全部不在 {AI/美国/世界/中国} 范围，没东西可投")
+        print(f"   源文件: {latest}")
+        return 4
+
+    to_send = kept[:MAX_PER_DISPATCH]
+    written = dispatch_items(to_send)
+
+    print(f"✅ dispatch broll from scout 完成")
+    print(f"   源: {latest.name}")
+    print(f"   投递数量: {len(written)} (源 {total} 条 → 过滤后 {len(kept)} 条 → 取 rank 最小 {len(to_send)} 条)")
+    for p, item in zip(written, to_send):
+        print(f"   - rank={item['rank']:>2} [{item['direction']}] {p.name}")
+
+    if len(kept) < MAX_PER_DISPATCH:
+        print()
+        print(f"⚠️ 只投递了 {len(kept)} 条，其余方向不符被过滤")
+
+    print()
+    print("👉 下一步: Google Drive 同步 (~30s) → Windows daemon 接住下载")
+    print("👉 回执位置: ~/Library/CloudStorage/.../我的云端硬盘/video-outputs/{slug}_ready.json")
+    return 0
+
+
 def main() -> int:
     msg = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
     low = msg.lower()
     log(f"📝 msg={msg!r}")
+
+    if "from scout" in low or "从 scout" in msg or "从scout" in msg or "派发选题" in msg:
+        return cmd_from_scout()
 
     if not msg or "test" in low or "测试" in msg:
         return cmd_test()
 
     print("❌ 未识别的命令")
     print()
-    print("MVP 仅支持: dispatch test")
-    print("未来支持: dispatch broll <path.json> / dispatch broll from scout")
+    print("支持的命令:")
+    print("  dispatch test                       → 投递 1 个测试 JSON")
+    print("  dispatch broll from scout / 派发选题 → 拉 Scout 最新输出投递 Top 5")
     return 1
 
 
