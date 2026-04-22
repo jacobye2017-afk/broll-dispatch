@@ -1,7 +1,7 @@
 """broll-dispatch 主入口。
 
-把选题 JSON 投递到 Windows B-Roll download agent 的 Google Drive inbox。
-支持: dispatch test / dispatch broll from scout。
+把用户自然语言标题投递到 Windows B-Roll download agent 的 Google Drive inbox。
+支持: <任何自然语言标题> / dispatch test
 """
 import json
 import os
@@ -13,7 +13,7 @@ from pathlib import Path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
-import normalize_from_scout
+import llm_expand
 
 INBOX = Path(
     "/Users/ye/Library/CloudStorage/GoogleDrive-jacobye2017@gmail.com"
@@ -59,18 +59,6 @@ def write_one(item: dict) -> Path:
     return path
 
 
-def dispatch_items(items: list[dict]) -> list[Path]:
-    if len(items) > MAX_PER_DISPATCH:
-        log(f"⚠️ 投递数量 {len(items)} 超过上限 {MAX_PER_DISPATCH}，截断")
-        items = items[:MAX_PER_DISPATCH]
-    written = []
-    for it in items:
-        p = write_one(it)
-        log(f"✅ wrote {p.name}")
-        written.append(p)
-    return written
-
-
 def build_test_item() -> dict:
     return {
         "rank": 1,
@@ -94,55 +82,38 @@ def build_test_item() -> dict:
 def cmd_test() -> int:
     if not INBOX.exists():
         print(f"❌ inbox 不存在: {INBOX}")
-        print("   检查 Google Drive 是否已挂载 / 路径是否正确")
         return 2
     item = build_test_item()
     log(f"📦 构造测试选题: rank={item['rank']} slug={item['slug']}")
-    written = dispatch_items([item])
+    p = write_one(item)
     print("✅ dispatch test 完成")
-    print(f"   投递数量: {len(written)}")
-    for p in written:
-        print(f"   - {p}")
-    print()
-    print("👉 下一步: Google Drive 同步 (~30s) → Windows daemon 自动接住")
-    print("👉 回执位置: ~/Library/CloudStorage/.../我的云端硬盘/video-outputs/")
+    print(f"   → {p.name}")
     return 0
 
 
-def cmd_from_scout() -> int:
+def cmd_expand(msg: str) -> int:
     if not INBOX.exists():
         print(f"❌ inbox 不存在: {INBOX}")
         return 2
-    latest = normalize_from_scout.find_latest_output()
-    if latest is None:
-        print("❌ Scout 还没产出选题，让 Tony 先跑一次\"今日选题\"")
+    log(f"🧠 LLM 扩展中: {msg!r}")
+    try:
+        item = llm_expand.expand(msg)
+    except Exception as e:
+        print(f"❌ LLM 扩展失败: {e}")
         return 3
-    log(f"📂 读取 Scout 最新输出: {latest.name}")
-
-    kept, total = normalize_from_scout.load_and_normalize(latest)
-    log(f"🧮 source={total} 条 / direction 过滤后剩 {len(kept)} 条")
-
-    if not kept:
-        print("❌ 这一批 Scout 选题方向全部不在 {AI/美国/世界/中国} 范围，没东西可投")
-        print(f"   源文件: {latest}")
-        return 4
-
-    to_send = kept[:MAX_PER_DISPATCH]
-    written = dispatch_items(to_send)
-
-    print(f"✅ dispatch broll from scout 完成")
-    print(f"   源: {latest.name}")
-    print(f"   投递数量: {len(written)} (源 {total} 条 → 过滤后 {len(kept)} 条 → 取 rank 最小 {len(to_send)} 条)")
-    for p, item in zip(written, to_send):
-        print(f"   - rank={item['rank']:>2} [{item['direction']}] {p.name}")
-
-    if len(kept) < MAX_PER_DISPATCH:
-        print()
-        print(f"⚠️ 只投递了 {len(kept)} 条，其余方向不符被过滤")
-
+    log(f"📦 slug={item['slug']} direction={item['direction']}")
+    p = write_one(item)
+    print(f"✅ 已投递: {msg}")
     print()
-    print("👉 下一步: Google Drive 同步 (~30s) → Windows daemon 接住下载")
-    print("👉 回执位置: ~/Library/CloudStorage/.../我的云端硬盘/video-outputs/{slug}_ready.json")
+    print(f"   标题: {item['title']}")
+    print(f"   方向: {item['direction']}")
+    print(f"   关键词: {', '.join(item['keywords'])}")
+    print(f"   角度:")
+    for a in item["angles"]:
+        print(f"     - {a}")
+    print(f"   文件: {p.name}")
+    print()
+    print("👉 下一步: 去 Windows 群说\"处理\",或等 daemon 自动接 (~60s)")
     return 0
 
 
@@ -151,18 +122,18 @@ def main() -> int:
     low = msg.lower()
     log(f"📝 msg={msg!r}")
 
-    if "from scout" in low or "从 scout" in msg or "从scout" in msg or "派发选题" in msg:
-        return cmd_from_scout()
+    if not msg:
+        print("❌ 请告诉我你要投什么选题,例如:")
+        print("   - dario 的故事")
+        print("   - 特朗普消失了 3 天")
+        print("   - 安克雷奇峰会")
+        print("或用 'dispatch test' 跑一次测试投递。")
+        return 1
 
-    if not msg or "test" in low or "测试" in msg:
+    if low in ("dispatch test", "测试") or low.startswith("dispatch test"):
         return cmd_test()
 
-    print("❌ 未识别的命令")
-    print()
-    print("支持的命令:")
-    print("  dispatch test                       → 投递 1 个测试 JSON")
-    print("  dispatch broll from scout / 派发选题 → 拉 Scout 最新输出投递 Top 5")
-    return 1
+    return cmd_expand(msg)
 
 
 if __name__ == "__main__":
